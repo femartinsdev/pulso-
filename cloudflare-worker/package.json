@@ -1,0 +1,21 @@
+{
+  "name": "pulso-c6-intake-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Receptor seguro do PULSO para notificações do C6 Bank em Cloudflare Workers + D1 (Camada Gratuita).",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "d1:create": "wrangler d1 create pulso-c6-intake-db",
+    "d1:init": "wrangler d1 execute pulso-c6-intake-db --remote --file=./schema.sql",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/worker.test.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261118.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.8.3",
+    "wrangler": "^4.165.0"
+  }
+}

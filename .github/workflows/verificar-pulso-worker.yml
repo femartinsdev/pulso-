@@ -1,0 +1,29 @@
+name: Verificar Worker PULSO (sem deploy)
+on:
+  pull_request:
+    paths:
+      - 'cloudflare-worker/**'
+      - '.github/workflows/verificar-pulso-worker.yml'
+  push:
+    paths:
+      - 'cloudflare-worker/**'
+      - '.github/workflows/verificar-pulso-worker.yml'
+permissions:
+  contents: read
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudflare-worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Instalar dependências
+        run: npm install --no-audit --no-fund
+      - name: Checar TypeScript
+        run: npm run typecheck
+      - name: Rodar testes
+        run: npm test
