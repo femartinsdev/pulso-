@@ -23,10 +23,10 @@ Esse SQL apenas cria tabelas e índices se ainda não existirem; não altera o F
 
 1. Cloudflare Dashboard → **Workers & Pages** → **Create application** → **Import a repository / Connect GitHub**.
 2. Autorize o repositório `femartinsdev/pulso-` e selecione a branch `main`.
-3. Configure o nome do Worker exatamente `pulso-c6-intake` e o **Root directory** como `cloudflare-worker`.
+3. Configure o nome do Worker exatamente `pulso` e o **Root directory** como `cloudflare-worker`.
 4. **Build command**: deixe vazio se opcional (o Worker TypeScript é compilado pelo Wrangler). **Deploy command**: `npx wrangler deploy`.
 5. Confira que a configuração do Wrangler inclui o binding D1 `DB` com o banco `pulso-c6-intake-db`. Confirme que a conta está no plano Free.
-6. Publique apenas depois de revisar as configurações. Cloudflare fornecerá uma URL `https://pulso-c6-intake.<seu-subdominio>.workers.dev`.
+6. Publique apenas depois de revisar as configurações. Cloudflare fornecerá uma URL `https://pulso.<seu-subdominio>.workers.dev`.
 
 No primeiro deploy, se faltarem bindings/segredos, as rotas protegidas podem falhar. Não teste transações reais ainda.
 
