@@ -1,0 +1,15 @@
+name = "pulso-c6-intake"
+main = "src/index.ts"
+compatibility_date = "2025-05-01"
+
+[vars]
+FIREBASE_PROJECT_ID = "knitted-backup-rnj8s"
+ALLOWED_ORIGINS = "https://ais-dev-rzytziincbb4xitfxirpmx-898906846392.us-east1.run.app,https://ais-pre-rzytziincbb4xitfxirpmx-898906846392.us-east1.run.app,http://localhost:3000"
+
+# Configure AUTHORIZED_OWNER_EMAIL como Secret na Cloudflare; NUNCA registre e-mail pessoal no GitHub.
+# Após rodar `npx wrangler d1 create pulso-c6-intake-db`,
+# substitua `REPLACE_WITH_YOUR_D1_DATABASE_ID` pelo `database_id` retornado pela Cloudflare.
+[[d1_databases]]
+binding = "DB"
+database_name = "pulso-c6-intake-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
