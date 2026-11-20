@@ -4,11 +4,19 @@ compatibility_date = "2025-05-01"
 
 [vars]
 FIREBASE_PROJECT_ID = "knitted-backup-rnj8s"
+# Para adicionar um domínio próprio de produção, acrescente-o separado por vírgula abaixo:
 ALLOWED_ORIGINS = "https://pulso-finan-as-ia.ai.studio,https://ais-dev-rzytziincbb4xitfxirpmx-898906846392.us-east1.run.app,https://ais-pre-rzytziincbb4xitfxirpmx-898906846392.us-east1.run.app,http://localhost:3000"
 
-# Configure AUTHORIZED_OWNER_EMAIL como Secret na Cloudflare; NUNCA registre e-mail pessoal no GitHub.
-# Banco D1 criado na conta Cloudflare; vincular em Workers & Pages > pulso-c6-intake > Bindings.
-# Aplicar schema.sql no console do D1 antes de utilizar o receptor.
+# IMPORTANTE (Segurança):
+# NUNCA fixe e-mail pessoal, tokens ou chaves VAPID privadas neste arquivo.
+# Configure como variáveis/segredos criptografados no painel da Cloudflare
+# (Workers & Pages -> pulso -> Settings -> Variables and Secrets) ou via CLI:
+#   npx wrangler secret put AUTHORIZED_OWNER_EMAIL
+#   npx wrangler secret put VAPID_SUBJECT          # ex.: mailto:seu-email@exemplo.com
+#   npx wrangler secret put VAPID_PUBLIC_KEY
+#   npx wrangler secret put VAPID_PRIVATE_KEY
+
+# Banco D1 existente já vinculado ao Worker publicado (não criar outro banco nem apagar dados):
 [[d1_databases]]
 binding = "DB"
 database_name = "pulso-c6-intake-db"

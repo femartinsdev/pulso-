@@ -9,7 +9,12 @@
  * - GET    /api/v1/tokens        (Auth: Firebase Auth ID Token RS256 da titular)
  * - POST   /api/v1/tokens        (Auth: Firebase Auth ID Token RS256 da titular)
  * - DELETE /api/v1/tokens/:id    (Auth: Firebase Auth ID Token RS256 da titular)
- * - GET    /api/v1/diagnostics   (Auth: Firebase Auth ID Token RS256 da titular)
+ * - GET    /api/v1/diagnostics      (Auth: Firebase Auth ID Token RS256 da titular)
+ * - GET    /api/v1/push/config      (Auth: Firebase Auth ID Token RS256 da titular)
+ * - POST   /api/v1/push/subscribe   (Auth: Firebase Auth ID Token RS256 da titular)
+ * - DELETE /api/v1/push/subscribe   (Auth: Firebase Auth ID Token RS256 da titular)
+ * - PUT    /api/v1/push/preferences (Auth: Firebase Auth ID Token RS256 da titular)
+ * - POST   /api/v1/push/test        (Auth: Firebase Auth ID Token RS256 da titular)
  */
 
 import { evaluateC6Notification, type IntakeRequestPayload } from './c6Parser.ts';
@@ -23,6 +28,20 @@ import {
   sha256Hex,
   verifyFirebaseIdToken,
 } from './security.ts';
+import {
+  buildPushCopyForEvent,
+  buildTestPushPayload,
+  DEFAULT_PUSH_PREFERENCES,
+  isValidPushEndpoint,
+  isValidPushKeys,
+  isValidPushTone,
+  isValidVapidConfig,
+  sendEncryptedWebPush,
+  type PushPreferences,
+  type PushTone,
+  type StoredPushSubscription,
+  type VapidConfig,
+} from './webPush.ts';
 
 export interface D1PreparedStatementLike {
   bind(...values: unknown[]): D1PreparedStatementLike;
@@ -40,12 +59,21 @@ export interface WorkerEnv {
   FIREBASE_PROJECT_ID: string;
   AUTHORIZED_OWNER_EMAIL: string;
   ALLOWED_ORIGINS?: string;
+  VAPID_PUBLIC_KEY?: string;
+  VAPID_PRIVATE_KEY?: string;
+  VAPID_SUBJECT?: string;
+  APP_PUBLIC_URL?: string;
+}
+
+export interface ExecutionContextLike {
+  waitUntil(promise: Promise<unknown>): void;
 }
 
 export interface HandleRequestOptions {
   nowMs?: number;
   fetchImpl?: typeof fetch;
   jwksOverride?: Record<string, JsonWebKey>;
+  executionCtx?: ExecutionContextLike;
 }
 
 interface DeviceTokenRow {
@@ -86,9 +114,256 @@ interface DeliveryLogRow {
   http_status: number;
 }
 
+interface PushSubscriptionRow {
+  id: string;
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  user_agent: string | null;
+  created_at: string;
+  updated_at: string;
+  revoked_at: string | null;
+}
+
+interface PushPreferencesRow {
+  owner_key: string;
+  enabled: number;
+  tone: string;
+  privacy_mode: number;
+  notify_income: number;
+  notify_expense: number;
+  notify_categorization: number;
+  last_phrase_index: number;
+  updated_at: string;
+}
+
 const MAX_INTAKE_BODY_BYTES = 16 * 1024; // 16 KB
 const RETENTION_ACKED_DAYS = 30;
 const MAX_DIAGNOSTIC_LOG_ROWS = 200;
+
+function getVapidConfig(env: WorkerEnv): VapidConfig | null {
+  const candidate: Partial<VapidConfig> = {
+    publicKey: env.VAPID_PUBLIC_KEY?.trim(),
+    privateKey: env.VAPID_PRIVATE_KEY?.trim(),
+    subject:
+      env.VAPID_SUBJECT?.trim() ||
+      (env.AUTHORIZED_OWNER_EMAIL ? `mailto:${env.AUTHORIZED_OWNER_EMAIL.trim()}` : undefined),
+  };
+  return isValidVapidConfig(candidate) ? candidate : null;
+}
+
+function getOwnerKey(env: WorkerEnv): string {
+  return (env.AUTHORIZED_OWNER_EMAIL ?? '').trim().toLowerCase() || 'owner';
+}
+
+function serializePushPreferences(prefs: PushPreferences) {
+  return {
+    enabled: prefs.enabled,
+    tone: prefs.tone,
+    privacyMode: prefs.privacyMode,
+    notifyIncome: prefs.notifyIncome,
+    notifyExpense: prefs.notifyExpense,
+    notifyCategorization: prefs.notifyCategorization,
+    updatedAt: prefs.updatedAt,
+  };
+}
+
+async function loadPushPreferences(
+  db: D1DatabaseLike,
+  ownerKey: string,
+  nowIso: string
+): Promise<PushPreferences> {
+  const row = await db
+    .prepare(
+      `SELECT owner_key, enabled, tone, privacy_mode, notify_income, notify_expense,
+              notify_categorization, last_phrase_index, updated_at
+       FROM push_preferences
+       WHERE owner_key = ?`
+    )
+    .bind(ownerKey)
+    .first<PushPreferencesRow>();
+
+  if (!row) {
+    return {
+      ...DEFAULT_PUSH_PREFERENCES,
+      updatedAt: nowIso,
+    };
+  }
+
+  return {
+    enabled: Boolean(Number(row.enabled)),
+    tone: isValidPushTone(row.tone) ? row.tone : 'sarcastic',
+    privacyMode: Boolean(Number(row.privacy_mode)),
+    notifyIncome: Boolean(Number(row.notify_income)),
+    notifyExpense: Boolean(Number(row.notify_expense)),
+    notifyCategorization: Boolean(Number(row.notify_categorization)),
+    lastPhraseIndex: Number.isFinite(Number(row.last_phrase_index))
+      ? Number(row.last_phrase_index)
+      : -1,
+    updatedAt: row.updated_at || nowIso,
+  };
+}
+
+async function savePushPreferences(
+  db: D1DatabaseLike,
+  ownerKey: string,
+  prefs: PushPreferences
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO push_preferences (
+         owner_key, enabled, tone, privacy_mode, notify_income, notify_expense,
+         notify_categorization, last_phrase_index, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(owner_key) DO UPDATE SET
+         enabled = excluded.enabled,
+         tone = excluded.tone,
+         privacy_mode = excluded.privacy_mode,
+         notify_income = excluded.notify_income,
+         notify_expense = excluded.notify_expense,
+         notify_categorization = excluded.notify_categorization,
+         last_phrase_index = excluded.last_phrase_index,
+         updated_at = excluded.updated_at`
+    )
+    .bind(
+      ownerKey,
+      prefs.enabled ? 1 : 0,
+      prefs.tone,
+      prefs.privacyMode ? 1 : 0,
+      prefs.notifyIncome ? 1 : 0,
+      prefs.notifyExpense ? 1 : 0,
+      prefs.notifyCategorization ? 1 : 0,
+      prefs.lastPhraseIndex,
+      prefs.updatedAt
+    )
+    .run();
+}
+
+async function listActivePushSubscriptions(db: D1DatabaseLike): Promise<StoredPushSubscription[]> {
+  const rows = await db
+    .prepare(
+      `SELECT id, endpoint, p256dh, auth, user_agent
+       FROM push_subscriptions
+       WHERE revoked_at IS NULL
+       ORDER BY updated_at DESC
+       LIMIT 20`
+    )
+    .all<PushSubscriptionRow>();
+
+  return (rows.results ?? []).map((r) => ({
+    id: r.id,
+    endpoint: r.endpoint,
+    p256dh: r.p256dh,
+    auth: r.auth,
+    userAgent: r.user_agent,
+  }));
+}
+
+async function dispatchPushForAcceptedIntakeEvent(
+  env: WorkerEnv,
+  options: HandleRequestOptions,
+  input: {
+    eventId: string;
+    proposedType: 'income' | 'expense' | 'transfer';
+    proposedAmountCents: number;
+    proposedDescription: string;
+    merchantName: string | null;
+    tokenId: string;
+    nowMs: number;
+    nowIso: string;
+  }
+): Promise<void> {
+  const vapid = getVapidConfig(env);
+  if (!vapid) return;
+
+  try {
+    const ownerKey = getOwnerKey(env);
+    const prefs = await loadPushPreferences(env.DB, ownerKey, input.nowIso);
+    if (!prefs.enabled) return;
+
+    if (input.proposedType === 'income' && !prefs.notifyIncome) return;
+    if (input.proposedType !== 'income' && !prefs.notifyExpense) return;
+
+    const subscriptions = await listActivePushSubscriptions(env.DB);
+    if (subscriptions.length === 0) return;
+
+    const { payload, nextPhraseIndex } = buildPushCopyForEvent({
+      eventId: input.eventId,
+      proposedType: input.proposedType,
+      proposedAmountCents: input.proposedAmountCents,
+      proposedDescription: input.proposedDescription,
+      merchantName: input.merchantName,
+      tone: prefs.tone,
+      privacyMode: prefs.privacyMode,
+      lastPhraseIndex: prefs.lastPhraseIndex,
+    });
+
+    await savePushPreferences(env.DB, ownerKey, {
+      ...prefs,
+      lastPhraseIndex: nextPhraseIndex,
+      updatedAt: input.nowIso,
+    });
+
+    let sentCount = 0;
+    let failedCount = 0;
+
+    for (const sub of subscriptions) {
+      const deliveryId = makeRandomId('psh');
+      const lockInsert = await env.DB.prepare(
+        `INSERT OR IGNORE INTO push_deliveries (
+           id, intake_event_id, subscription_id, status, http_status, sent_at
+         ) VALUES (?, ?, ?, ?, ?, ?)`
+      )
+        .bind(deliveryId, input.eventId, sub.id, 'sending', null, input.nowIso)
+        .run();
+
+      // Garante no máximo 1 push por evento único e inscrição
+      if ((lockInsert.meta?.changes ?? 0) === 0) {
+        continue;
+      }
+
+      const sendRes = await sendEncryptedWebPush(sub, payload, vapid, {
+        fetchImpl: options.fetchImpl,
+        nowMs: input.nowMs,
+      });
+
+      const finalStatus = sendRes.ok ? 'sent' : sendRes.expired ? 'expired' : 'failed';
+      await env.DB.prepare(
+        `UPDATE push_deliveries SET status = ?, http_status = ? WHERE id = ?`
+      )
+        .bind(finalStatus, sendRes.status || null, deliveryId)
+        .run();
+
+      if (sendRes.expired) {
+        await env.DB.prepare(
+          `UPDATE push_subscriptions SET revoked_at = ?, updated_at = ? WHERE id = ?`
+        )
+          .bind(input.nowIso, input.nowIso, sub.id)
+          .run();
+      }
+
+      if (sendRes.ok) {
+        sentCount += 1;
+      } else {
+        failedCount += 1;
+      }
+    }
+
+    if (sentCount > 0 || failedCount > 0) {
+      await appendDeliveryLog(env.DB, {
+        nowIso: input.nowIso,
+        route: '/api/v1/intake#push',
+        outcome: sentCount > 0 ? 'push_sent' : 'push_failed',
+        reasonCode: sentCount > 0 ? `tone_${prefs.tone}` : 'push_delivery_error',
+        summary: `Push: ${sentCount} enviado(s), ${failedCount} falha(s)${prefs.privacyMode ? ' [privado]' : ''}`,
+        tokenId: input.tokenId,
+        httpStatus: sentCount > 0 ? 201 : 502,
+      });
+    }
+  } catch {
+    // Falha no envio de push ou tabelas ainda não migradas nunca deve quebrar /api/v1/intake
+  }
+}
 
 function jsonResponse(
   body: unknown,
@@ -198,6 +473,9 @@ async function authenticateFirebaseOwner(
   env: WorkerEnv,
   options: HandleRequestOptions
 ) {
+  if (!env.AUTHORIZED_OWNER_EMAIL || !env.AUTHORIZED_OWNER_EMAIL.trim()) {
+    return { valid: false as const, reason: 'missing_owner_email_config' };
+  }
   const bearer = extractBearerToken(request);
   if (!bearer) {
     return { valid: false as const, reason: 'missing_authorization_header' };
@@ -429,6 +707,23 @@ export async function handleWorkerRequest(
     });
 
     await cleanupOldAckedEvents(env.DB, nowMs);
+
+    const pushTask = dispatchPushForAcceptedIntakeEvent(env, options, {
+      eventId,
+      proposedType: evt.proposedType,
+      proposedAmountCents: evt.proposedAmountCents,
+      proposedDescription: evt.proposedDescription,
+      merchantName: evt.merchantName,
+      tokenId: tokenRow.id,
+      nowMs,
+      nowIso,
+    });
+
+    if (options.executionCtx) {
+      options.executionCtx.waitUntil(pushTask);
+    } else {
+      await pushTask;
+    }
 
     return jsonResponse(
       {
@@ -711,11 +1006,306 @@ export async function handleWorkerRequest(
     );
   }
 
+  // GET /api/v1/push/config
+  if (url.pathname === '/api/v1/push/config' && request.method === 'GET') {
+    const vapid = getVapidConfig(env);
+    try {
+      const ownerKey = getOwnerKey(env);
+      const prefs = await loadPushPreferences(env.DB, ownerKey, nowIso);
+      const activeSubs = await env.DB.prepare(
+        `SELECT COUNT(*) AS cnt FROM push_subscriptions WHERE revoked_at IS NULL`
+      ).first<{ cnt: number }>();
+
+      return jsonResponse(
+        {
+          ok: true,
+          supported: true,
+          pushConfigured: Boolean(vapid),
+          vapidPublicKey: vapid ? vapid.publicKey : null,
+          activeSubscriptionsCount: Number(activeSubs?.cnt ?? 0),
+          preferences: serializePushPreferences(prefs),
+        },
+        200,
+        corsHeaders
+      );
+    } catch {
+      return jsonResponse(
+        {
+          ok: false,
+          error: 'push_schema_not_migrated',
+          message: 'Aplique a migration migrations/002_web_push.sql no Cloudflare D1 antes de ativar notificações.',
+        },
+        503,
+        corsHeaders
+      );
+    }
+  }
+
+  // POST /api/v1/push/subscribe
+  if (url.pathname === '/api/v1/push/subscribe' && request.method === 'POST') {
+    let body: {
+      endpoint?: string;
+      keys?: { p256dh?: string; auth?: string };
+      userAgent?: string;
+    };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return jsonResponse({ ok: false, error: 'invalid_json' }, 400, corsHeaders);
+    }
+
+    const endpoint = typeof body.endpoint === 'string' ? body.endpoint.trim() : '';
+    const p256dh = typeof body.keys?.p256dh === 'string' ? body.keys.p256dh.trim() : '';
+    const auth = typeof body.keys?.auth === 'string' ? body.keys.auth.trim() : '';
+    const userAgent =
+      typeof body.userAgent === 'string' ? body.userAgent.trim().slice(0, 240) : null;
+
+    if (!isValidPushEndpoint(endpoint) || !isValidPushKeys(p256dh, auth)) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: 'invalid_push_subscription',
+          message: 'Inscrição Web Push inválida (endpoint HTTPS ou chaves p256dh/auth ausentes).',
+        },
+        400,
+        corsHeaders
+      );
+    }
+
+    const existing = await env.DB.prepare(
+      `SELECT id FROM push_subscriptions WHERE endpoint = ?`
+    )
+      .bind(endpoint)
+      .first<{ id: string }>();
+
+    const subscriptionId = existing?.id ?? makeRandomId('sub');
+    if (existing?.id) {
+      await env.DB.prepare(
+        `UPDATE push_subscriptions
+         SET p256dh = ?, auth = ?, user_agent = ?, updated_at = ?, revoked_at = NULL
+         WHERE id = ?`
+      )
+        .bind(p256dh, auth, userAgent, nowIso, subscriptionId)
+        .run();
+    } else {
+      await env.DB.prepare(
+        `INSERT INTO push_subscriptions (
+           id, endpoint, p256dh, auth, user_agent, created_at, updated_at, revoked_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`
+      )
+        .bind(subscriptionId, endpoint, p256dh, auth, userAgent, nowIso, nowIso)
+        .run();
+    }
+
+    // Garante registro inicial de preferências com padrão Sarcástico ativo
+    const ownerKey = getOwnerKey(env);
+    const currentPrefs = await loadPushPreferences(env.DB, ownerKey, nowIso);
+    await savePushPreferences(env.DB, ownerKey, {
+      ...currentPrefs,
+      enabled: true,
+      updatedAt: nowIso,
+    });
+
+    const activeSubs = await env.DB.prepare(
+      `SELECT COUNT(*) AS cnt FROM push_subscriptions WHERE revoked_at IS NULL`
+    ).first<{ cnt: number }>();
+
+    await appendDeliveryLog(env.DB, {
+      nowIso,
+      route: '/api/v1/push/subscribe',
+      outcome: 'push_subscribed',
+      reasonCode: 'subscription_registered',
+      summary: `Dispositivo inscrito para Web Push (${subscriptionId})`,
+      httpStatus: 201,
+    });
+
+    return jsonResponse(
+      {
+        ok: true,
+        subscriptionId,
+        activeSubscriptionsCount: Number(activeSubs?.cnt ?? 1),
+      },
+      201,
+      corsHeaders
+    );
+  }
+
+  // DELETE /api/v1/push/subscribe
+  if (url.pathname === '/api/v1/push/subscribe' && request.method === 'DELETE') {
+    let body: { endpoint?: string; revokeAll?: boolean } = {};
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      body = {};
+    }
+
+    let revokedCount = 0;
+    if (typeof body.endpoint === 'string' && body.endpoint.trim()) {
+      const res = await env.DB.prepare(
+        `UPDATE push_subscriptions SET revoked_at = ?, updated_at = ? WHERE endpoint = ? AND revoked_at IS NULL`
+      )
+        .bind(nowIso, nowIso, body.endpoint.trim())
+        .run();
+      revokedCount = res.meta?.changes ?? 0;
+    } else {
+      const res = await env.DB.prepare(
+        `UPDATE push_subscriptions SET revoked_at = ?, updated_at = ? WHERE revoked_at IS NULL`
+      )
+        .bind(nowIso, nowIso)
+        .run();
+      revokedCount = res.meta?.changes ?? 0;
+    }
+
+    await appendDeliveryLog(env.DB, {
+      nowIso,
+      route: '/api/v1/push/subscribe',
+      outcome: 'push_unsubscribed',
+      reasonCode: 'subscription_revoked',
+      summary: `Inscrições Web Push revogadas: ${revokedCount}`,
+      httpStatus: 200,
+    });
+
+    return jsonResponse({ ok: true, revokedCount }, 200, corsHeaders);
+  }
+
+  // PUT /api/v1/push/preferences
+  if (url.pathname === '/api/v1/push/preferences' && request.method === 'PUT') {
+    let body: {
+      enabled?: boolean;
+      tone?: PushTone;
+      privacyMode?: boolean;
+      notifyIncome?: boolean;
+      notifyExpense?: boolean;
+      notifyCategorization?: boolean;
+    };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return jsonResponse({ ok: false, error: 'invalid_json' }, 400, corsHeaders);
+    }
+
+    if (body.tone !== undefined && !isValidPushTone(body.tone)) {
+      return jsonResponse(
+        { ok: false, error: 'invalid_push_tone', message: 'Tom inválido. Use sarcastic, funny ou discreet.' },
+        400,
+        corsHeaders
+      );
+    }
+
+    const ownerKey = getOwnerKey(env);
+    const current = await loadPushPreferences(env.DB, ownerKey, nowIso);
+    const next: PushPreferences = {
+      enabled: typeof body.enabled === 'boolean' ? body.enabled : current.enabled,
+      tone: body.tone ?? current.tone,
+      privacyMode: typeof body.privacyMode === 'boolean' ? body.privacyMode : current.privacyMode,
+      notifyIncome: typeof body.notifyIncome === 'boolean' ? body.notifyIncome : current.notifyIncome,
+      notifyExpense: typeof body.notifyExpense === 'boolean' ? body.notifyExpense : current.notifyExpense,
+      notifyCategorization:
+        typeof body.notifyCategorization === 'boolean'
+          ? body.notifyCategorization
+          : current.notifyCategorization,
+      lastPhraseIndex: current.lastPhraseIndex,
+      updatedAt: nowIso,
+    };
+
+    await savePushPreferences(env.DB, ownerKey, next);
+
+    return jsonResponse(
+      {
+        ok: true,
+        preferences: serializePushPreferences(next),
+      },
+      200,
+      corsHeaders
+    );
+  }
+
+  // POST /api/v1/push/test
+  if (url.pathname === '/api/v1/push/test' && request.method === 'POST') {
+    const vapid = getVapidConfig(env);
+    if (!vapid) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: 'vapid_not_configured',
+          message:
+            'Configure VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY e VAPID_SUBJECT no Cloudflare Worker antes de testar.',
+        },
+        400,
+        corsHeaders
+      );
+    }
+
+    const subscriptions = await listActivePushSubscriptions(env.DB);
+    if (subscriptions.length === 0) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: 'no_active_push_subscriptions',
+          message: 'Nenhum dispositivo inscrito. Clique em "Ativar notificações" no iPhone primeiro.',
+        },
+        400,
+        corsHeaders
+      );
+    }
+
+    const ownerKey = getOwnerKey(env);
+    const prefs = await loadPushPreferences(env.DB, ownerKey, nowIso);
+    const payload = buildTestPushPayload(prefs.tone, prefs.privacyMode);
+
+    let sentCount = 0;
+    let failedCount = 0;
+
+    for (const sub of subscriptions) {
+      const res = await sendEncryptedWebPush(sub, payload, vapid, {
+        fetchImpl: options.fetchImpl,
+        nowMs,
+      });
+
+      if (res.expired) {
+        await env.DB.prepare(
+          `UPDATE push_subscriptions SET revoked_at = ?, updated_at = ? WHERE id = ?`
+        )
+          .bind(nowIso, nowIso, sub.id)
+          .run();
+      }
+
+      if (res.ok) {
+        sentCount += 1;
+      } else {
+        failedCount += 1;
+      }
+    }
+
+    await appendDeliveryLog(env.DB, {
+      nowIso,
+      route: '/api/v1/push/test',
+      outcome: sentCount > 0 ? 'push_test_sent' : 'push_test_failed',
+      reasonCode: sentCount > 0 ? `tone_${prefs.tone}` : 'push_delivery_error',
+      summary: `Teste Push: ${sentCount} enviado(s), ${failedCount} falha(s)`,
+      httpStatus: sentCount > 0 ? 200 : 502,
+    });
+
+    return jsonResponse(
+      {
+        ok: sentCount > 0,
+        sentCount,
+        failedCount,
+        message:
+          sentCount > 0
+            ? `Notificação de teste enviada para ${sentCount} dispositivo(s).`
+            : 'Falha ao entregar notificação de teste. Verifique se o app está instalado na Tela de Início do iPhone.',
+      },
+      sentCount > 0 ? 200 : 502,
+      corsHeaders
+    );
+  }
+
   return jsonResponse({ ok: false, error: 'not_found' }, 404, corsHeaders);
 }
 
 export default {
-  fetch(request: Request, env: WorkerEnv): Promise<Response> {
-    return handleWorkerRequest(request, env);
+  fetch(request: Request, env: WorkerEnv, ctx?: ExecutionContextLike): Promise<Response> {
+    return handleWorkerRequest(request, env, { executionCtx: ctx });
   },
 };
