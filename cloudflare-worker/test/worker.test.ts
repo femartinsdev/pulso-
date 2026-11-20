@@ -7,6 +7,10 @@ import {
   type WorkerEnv,
 } from '../src/index.ts';
 import { clearJwksCacheForTests } from '../src/security.ts';
+import {
+  buildPushCopyForEvent,
+  toBase64Url as toWebPushBase64Url,
+} from '../src/webPush.ts';
 
 /**
  * Mock fiel em memória do Cloudflare D1 apenas para testes automatizados locais.
@@ -15,6 +19,9 @@ class InMemoryD1 implements D1DatabaseLike {
   deviceTokens: Array<Record<string, unknown>> = [];
   intakeEvents: Array<Record<string, unknown>> = [];
   deliveryLogs: Array<Record<string, unknown>> = [];
+  pushSubscriptions: Array<Record<string, unknown>> = [];
+  pushPreferences: Array<Record<string, unknown>> = [];
+  pushDeliveries: Array<Record<string, unknown>> = [];
 
   prepare(query: string): D1PreparedStatementLike {
     const db = this;
@@ -41,6 +48,20 @@ class InMemoryD1 implements D1DatabaseLike {
           return {
             cnt: db.deviceTokens.filter((t) => t.revoked_at === null).length,
           } as T;
+        }
+        if (normalized.includes('SELECT COUNT(*) AS cnt FROM push_subscriptions WHERE revoked_at IS NULL')) {
+          return {
+            cnt: db.pushSubscriptions.filter((s) => s.revoked_at === null).length,
+          } as T;
+        }
+        if (normalized.includes('FROM push_preferences WHERE owner_key = ?')) {
+          const [ownerKey] = bound;
+          return (db.pushPreferences.find((p) => p.owner_key === ownerKey) ?? null) as T | null;
+        }
+        if (normalized.includes('SELECT id FROM push_subscriptions WHERE endpoint = ?')) {
+          const [endpoint] = bound;
+          const row = db.pushSubscriptions.find((s) => s.endpoint === endpoint);
+          return (row ? { id: row.id } : null) as T | null;
         }
         return null;
       },
@@ -69,6 +90,13 @@ class InMemoryD1 implements D1DatabaseLike {
             results: [...db.deliveryLogs]
               .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
               .slice(0, 50) as T[],
+          };
+        }
+        if (normalized.includes('FROM push_subscriptions WHERE revoked_at IS NULL')) {
+          return {
+            results: db.pushSubscriptions
+              .filter((s) => s.revoked_at === null)
+              .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at))) as T[],
           };
         }
         return { results: [] };
@@ -185,6 +213,132 @@ class InMemoryD1 implements D1DatabaseLike {
           );
           return { success: true, meta: { changes: before - db.intakeEvents.length } };
         }
+        if (normalized.startsWith('INSERT INTO push_subscriptions')) {
+          const [id, endpoint, p256dh, auth, user_agent, created_at, updated_at] = bound;
+          db.pushSubscriptions.push({
+            id,
+            endpoint,
+            p256dh,
+            auth,
+            user_agent,
+            created_at,
+            updated_at,
+            revoked_at: null,
+          });
+          return { success: true, meta: { changes: 1 } };
+        }
+        if (normalized.startsWith('UPDATE push_subscriptions SET p256dh')) {
+          const [p256dh, auth, user_agent, updated_at, id] = bound;
+          const row = db.pushSubscriptions.find((s) => s.id === id);
+          if (row) {
+            row.p256dh = p256dh;
+            row.auth = auth;
+            row.user_agent = user_agent;
+            row.updated_at = updated_at;
+            row.revoked_at = null;
+            return { success: true, meta: { changes: 1 } };
+          }
+          return { success: true, meta: { changes: 0 } };
+        }
+        if (normalized.startsWith('UPDATE push_subscriptions SET revoked_at = ?, updated_at = ? WHERE endpoint = ?')) {
+          const [revoked_at, updated_at, endpoint] = bound;
+          let changes = 0;
+          for (const row of db.pushSubscriptions) {
+            if (row.endpoint === endpoint && row.revoked_at === null) {
+              row.revoked_at = revoked_at;
+              row.updated_at = updated_at;
+              changes += 1;
+            }
+          }
+          return { success: true, meta: { changes } };
+        }
+        if (normalized.startsWith('UPDATE push_subscriptions SET revoked_at = ?, updated_at = ? WHERE id = ?')) {
+          const [revoked_at, updated_at, id] = bound;
+          const row = db.pushSubscriptions.find((s) => s.id === id);
+          if (row) {
+            row.revoked_at = revoked_at;
+            row.updated_at = updated_at;
+            return { success: true, meta: { changes: 1 } };
+          }
+          return { success: true, meta: { changes: 0 } };
+        }
+        if (normalized.startsWith('UPDATE push_subscriptions SET revoked_at = ?, updated_at = ? WHERE revoked_at IS NULL')) {
+          const [revoked_at, updated_at] = bound;
+          let changes = 0;
+          for (const row of db.pushSubscriptions) {
+            if (row.revoked_at === null) {
+              row.revoked_at = revoked_at;
+              row.updated_at = updated_at;
+              changes += 1;
+            }
+          }
+          return { success: true, meta: { changes } };
+        }
+        if (normalized.startsWith('INSERT INTO push_preferences')) {
+          const [
+            owner_key,
+            enabled,
+            tone,
+            privacy_mode,
+            notify_income,
+            notify_expense,
+            notify_categorization,
+            last_phrase_index,
+            updated_at,
+          ] = bound;
+          const existing = db.pushPreferences.find((p) => p.owner_key === owner_key);
+          if (existing) {
+            existing.enabled = enabled;
+            existing.tone = tone;
+            existing.privacy_mode = privacy_mode;
+            existing.notify_income = notify_income;
+            existing.notify_expense = notify_expense;
+            existing.notify_categorization = notify_categorization;
+            existing.last_phrase_index = last_phrase_index;
+            existing.updated_at = updated_at;
+          } else {
+            db.pushPreferences.push({
+              owner_key,
+              enabled,
+              tone,
+              privacy_mode,
+              notify_income,
+              notify_expense,
+              notify_categorization,
+              last_phrase_index,
+              updated_at,
+            });
+          }
+          return { success: true, meta: { changes: 1 } };
+        }
+        if (normalized.startsWith('INSERT OR IGNORE INTO push_deliveries')) {
+          const [id, intake_event_id, subscription_id, status, http_status, sent_at] = bound;
+          const exists = db.pushDeliveries.some(
+            (d) => d.intake_event_id === intake_event_id && d.subscription_id === subscription_id
+          );
+          if (exists) {
+            return { success: true, meta: { changes: 0 } };
+          }
+          db.pushDeliveries.push({
+            id,
+            intake_event_id,
+            subscription_id,
+            status,
+            http_status,
+            sent_at,
+          });
+          return { success: true, meta: { changes: 1 } };
+        }
+        if (normalized.startsWith('UPDATE push_deliveries SET status = ?')) {
+          const [status, http_status, id] = bound;
+          const row = db.pushDeliveries.find((d) => d.id === id);
+          if (row) {
+            row.status = status;
+            row.http_status = http_status;
+            return { success: true, meta: { changes: 1 } };
+          }
+          return { success: true, meta: { changes: 0 } };
+        }
         return { success: true, meta: { changes: 0 } };
       },
     };
@@ -233,7 +387,7 @@ async function createTestSigner() {
 
 const ORIGIN = 'https://ais-dev-rzytziincbb4xitfxirpmx-898906846392.us-east1.run.app';
 const PROJECT_ID = 'knitted-backup-rnj8s';
-const OWNER_EMAIL = 'test-owner@example.com';
+const OWNER_EMAIL = 'owner@example.com';
 const NOW_MS = Date.parse('2026-11-19T14:00:00.000Z');
 
 function makeBaseClaims(overrides: Record<string, unknown> = {}) {
@@ -602,4 +756,265 @@ test('Worker filtra OTP/promoções/outros bancos, distingue crédito/própria, 
     { nowMs: NOW_MS, jwksOverride }
   );
   assert.equal(((await pendingAfter.json()) as { events: unknown[] }).events.length, 0);
+});
+
+async function generateTestVapidKeys(): Promise<{ publicKey: string; privateKey: string }> {
+  const pair = await crypto.subtle.generateKey(
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    true,
+    ['sign', 'verify']
+  );
+  const rawPub = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+  const jwkPriv = await crypto.subtle.exportKey('jwk', pair.privateKey);
+  assert.ok(jwkPriv.d);
+  return {
+    publicKey: toWebPushBase64Url(rawPub),
+    privateKey: jwkPriv.d,
+  };
+}
+
+async function generateTestSubscriptionKeys(): Promise<{ p256dh: string; auth: string }> {
+  const pair = await crypto.subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-256' },
+    true,
+    ['deriveBits']
+  );
+  const rawPub = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+  const auth = new Uint8Array(16);
+  crypto.getRandomValues(auth);
+  return {
+    p256dh: toWebPushBase64Url(rawPub),
+    auth: toWebPushBase64Url(auth),
+  };
+}
+
+test('PULSO 2.0 Web Push: envia exatamente 1 push RFC 8291 por evento C6 aceito, ignora OTP/duplicado, respeita privacidade e revoga 410', async () => {
+  clearJwksCacheForTests();
+  const db = new InMemoryD1();
+  const vapid = await generateTestVapidKeys();
+  const env: WorkerEnv = {
+    ...createEnv(db),
+    VAPID_PUBLIC_KEY: vapid.publicKey,
+    VAPID_PRIVATE_KEY: vapid.privateKey,
+    VAPID_SUBJECT: `mailto:${OWNER_EMAIL}`,
+  };
+  const { jwksOverride, signJwt } = await createTestSigner();
+  const ownerJwt = await signJwt(makeBaseClaims());
+
+  // 1. Sem JWT da titular -> 401
+  const unauthPushRes = await handleWorkerRequest(
+    new Request('https://worker.test/api/v1/push/config', { headers: { Origin: ORIGIN } }),
+    env,
+    { nowMs: NOW_MS, jwksOverride }
+  );
+  assert.equal(unauthPushRes.status, 401);
+
+  // 2. GET /api/v1/push/config retorna pushConfigured=true e tom padrão 'sarcastic'
+  const cfgRes = await handleWorkerRequest(
+    new Request('https://worker.test/api/v1/push/config', {
+      headers: { Origin: ORIGIN, Authorization: `Bearer ${ownerJwt}` },
+    }),
+    env,
+    { nowMs: NOW_MS, jwksOverride }
+  );
+  assert.equal(cfgRes.status, 200);
+  const cfg = (await cfgRes.json()) as {
+    ok: boolean;
+    pushConfigured: boolean;
+    vapidPublicKey: string;
+    preferences: { tone: string; privacyMode: boolean };
+  };
+  assert.equal(cfg.ok, true);
+  assert.equal(cfg.pushConfigured, true);
+  assert.equal(cfg.vapidPublicKey, vapid.publicKey);
+  assert.equal(cfg.preferences.tone, 'sarcastic');
+  assert.equal(cfg.preferences.privacyMode, false);
+
+  // 3. Inscreve iPhone em POST /api/v1/push/subscribe
+  const subKeys = await generateTestSubscriptionKeys();
+  const endpoint = 'https://web.push.apple.com/QTestSubscriptionEndpoint01';
+  const subRes = await handleWorkerRequest(
+    new Request('https://worker.test/api/v1/push/subscribe', {
+      method: 'POST',
+      headers: {
+        Origin: ORIGIN,
+        Authorization: `Bearer ${ownerJwt}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        endpoint,
+        keys: subKeys,
+        userAgent: 'iPhone PWA Safari',
+      }),
+    }),
+    env,
+    { nowMs: NOW_MS, jwksOverride }
+  );
+  assert.equal(subRes.status, 201);
+  assert.equal(db.pushSubscriptions.length, 1);
+
+  // 4. Cria token do iPhone para /api/v1/intake
+  const tokRes = await handleWorkerRequest(
+    new Request('https://worker.test/api/v1/tokens', {
+      method: 'POST',
+      headers: { Origin: ORIGIN, Authorization: `Bearer ${ownerJwt}` },
+      body: JSON.stringify({ label: 'iPhone Push Test' }),
+    }),
+    env,
+    { nowMs: NOW_MS, jwksOverride }
+  );
+  const { plaintextToken } = (await tokRes.json()) as { plaintextToken: string };
+
+  // Captura chamadas HTTP ao Apple Push Service
+  const sentPushRequests: Array<{ url: string; headers: Headers; bodyLength: number }> = [];
+  let nextPushStatus = 201;
+  const mockFetch: typeof fetch = async (input, init) => {
+    const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    const headers = new Headers(init?.headers);
+    const bodyBuf = init?.body instanceof ArrayBuffer ? init.body.byteLength : 0;
+    sentPushRequests.push({ url: urlStr, headers, bodyLength: bodyBuf });
+    return new Response(null, { status: nextPushStatus });
+  };
+
+  // 5. OTP NÃO dispara push
+  const otpRes = await handleWorkerRequest(
+    new Request('https://worker.test/api/v1/intake', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${plaintextToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bank: 'C6 Bank',
+        text: 'C6 Bank: Seu código OTP é 991822.',
+        receivedAt: '2026-11-19T14:00:00-03:00',
+      }),
+    }),
+    env,
+    { nowMs: NOW_MS, jwksOverride, fetchImpl: mockFetch }
+  );
+  assert.equal(otpRes.status, 200);
+  assert.equal(sentPushRequests.length, 0);
+
+  // 6. Transação C6 aceita dispara EXATAMENTE 1 push criptografado RFC 8291 + VAPID
+  const buyPayload = {
+    bank: 'C6 Bank',
+    text: 'C6 Bank: Compra aprovada no débito de R$ 42,50 em PIZZARIA DO BAIRRO',
+    receivedAt: '2026-11-19T14:10:00-03:00',
+  };
+  const tx1Res = await handleWorkerRequest(
+    new Request('https://worker.test/api/v1/intake', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${plaintextToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(buyPayload),
+    }),
+    env,
+    { nowMs: NOW_MS, jwksOverride, fetchImpl: mockFetch }
+  );
+  assert.equal(tx1Res.status, 201);
+  assert.equal(sentPushRequests.length, 1);
+  assert.equal(sentPushRequests[0].url, endpoint);
+  assert.equal(sentPushRequests[0].headers.get('Content-Encoding'), 'aes128gcm');
+  assert.match(sentPushRequests[0].headers.get('Authorization') ?? '', /^vapid t=.+, k=.+$/);
+  assert.ok(sentPushRequests[0].bodyLength > 86); // header aes128gcm (86B) + ciphertext + tag
+  assert.equal(db.pushDeliveries.length, 1);
+  assert.equal(db.pushDeliveries[0].status, 'sent');
+
+  // 7. Reenvio duplicado NÃO envia segundo push
+  const tx1Dup = await handleWorkerRequest(
+    new Request('https://worker.test/api/v1/intake', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${plaintextToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(buyPayload),
+    }),
+    env,
+    { nowMs: NOW_MS, jwksOverride, fetchImpl: mockFetch }
+  );
+  assert.equal(tx1Dup.status, 200);
+  assert.equal(sentPushRequests.length, 1);
+
+  // 8. Teste de copy: modo privacidade oculta valor e estabelecimento, e rotação anti-repetição funciona
+  const firstCopy = buildPushCopyForEvent({
+    eventId: 'evt_1',
+    proposedType: 'expense',
+    proposedAmountCents: 4250,
+    proposedDescription: 'PIZZARIA DO BAIRRO',
+    merchantName: 'PIZZARIA DO BAIRRO',
+    tone: 'sarcastic',
+    privacyMode: false,
+    lastPhraseIndex: -1,
+  });
+  const secondCopy = buildPushCopyForEvent({
+    eventId: 'evt_2',
+    proposedType: 'expense',
+    proposedAmountCents: 4250,
+    proposedDescription: 'PIZZARIA DO BAIRRO',
+    merchantName: 'PIZZARIA DO BAIRRO',
+    tone: 'sarcastic',
+    privacyMode: false,
+    lastPhraseIndex: firstCopy.nextPhraseIndex,
+  });
+  assert.notEqual(firstCopy.payload.body, secondCopy.payload.body);
+  assert.ok(firstCopy.payload.body.includes('R$ 42,50'));
+
+  const privateCopy = buildPushCopyForEvent({
+    eventId: 'evt_3',
+    proposedType: 'expense',
+    proposedAmountCents: 99990,
+    proposedDescription: 'JOALHERIA SECRETA',
+    merchantName: 'JOALHERIA SECRETA',
+    tone: 'sarcastic',
+    privacyMode: true,
+    lastPhraseIndex: 0,
+  });
+  assert.equal(privateCopy.payload.body.includes('999'), false);
+  assert.equal(privateCopy.payload.body.includes('JOALHERIA'), false);
+
+  // 9. PUT /api/v1/push/preferences alterna para modo privacidade + tom discreto
+  const prefRes = await handleWorkerRequest(
+    new Request('https://worker.test/api/v1/push/preferences', {
+      method: 'PUT',
+      headers: {
+        Origin: ORIGIN,
+        Authorization: `Bearer ${ownerJwt}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        enabled: true,
+        tone: 'discreet',
+        privacyMode: true,
+        notifyIncome: true,
+        notifyExpense: true,
+        notifyCategorization: true,
+      }),
+    }),
+    env,
+    { nowMs: NOW_MS, jwksOverride }
+  );
+  assert.equal(prefRes.status, 200);
+  const prefJson = (await prefRes.json()) as { preferences: { tone: string; privacyMode: boolean } };
+  assert.equal(prefJson.preferences.tone, 'discreet');
+  assert.equal(prefJson.preferences.privacyMode, true);
+
+  // 10. POST /api/v1/push/test entrega com sucesso e 410 Gone revoga inscrição expirada
+  const testPushOk = await handleWorkerRequest(
+    new Request('https://worker.test/api/v1/push/test', {
+      method: 'POST',
+      headers: { Origin: ORIGIN, Authorization: `Bearer ${ownerJwt}` },
+    }),
+    env,
+    { nowMs: NOW_MS, jwksOverride, fetchImpl: mockFetch }
+  );
+  assert.equal(testPushOk.status, 200);
+  assert.equal(sentPushRequests.length, 2);
+
+  nextPushStatus = 410;
+  const testPushGone = await handleWorkerRequest(
+    new Request('https://worker.test/api/v1/push/test', {
+      method: 'POST',
+      headers: { Origin: ORIGIN, Authorization: `Bearer ${ownerJwt}` },
+    }),
+    env,
+    { nowMs: NOW_MS, jwksOverride, fetchImpl: mockFetch }
+  );
+  assert.equal(testPushGone.status, 502);
+  // Inscrição foi revogada automaticamente após 410 Gone
+  assert.notEqual(db.pushSubscriptions[0].revoked_at, null);
 });
