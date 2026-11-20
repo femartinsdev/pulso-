@@ -21,3 +21,7 @@ ALLOWED_ORIGINS = "https://pulso-finan-as-ia.ai.studio,https://ais-dev-rzytziinc
 binding = "DB"
 database_name = "pulso-c6-intake-db"
 database_id = "a66463bb-5723-4d05-b41e-bf1f8853e452"
+
+# Configuracao exigida pelo comando `wrangler preview` para validar PRs.
+# Sem bindings de producao: previews nao devem acessar D1/segredos reais.
+[previews]
