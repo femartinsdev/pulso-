@@ -1,0 +1,20 @@
+# PULSO — compatibilidade de Previews da Cloudflare.
+#
+# ESTE ARQUIVO NA RAIZ serve exclusivamente como fallback para o bug do
+# Workers Builds que inicia a compilacao de PR em "/" mesmo quando a pasta
+# configurada do Worker e "cloudflare-worker".
+# O deploy de PRODUCAO usa cloudflare-worker/wrangler.toml via
+# Root directory = cloudflare-worker no painel Cloudflare.
+#
+# Nao utilize "wrangler deploy" a partir da raiz do repositorio.
+# Este fallback nao define DB, VAPID, AUTHORIZED_OWNER_EMAIL nem tokens.
+# Previews nao devem acessar dados financeiros de producao.
+#
+# Referencia: https://github.com/cloudflare/developer-platform/issues/75
+
+name = "pulso"
+main = "cloudflare-worker/src/index.ts"
+compatibility_date = "2025-05-01"
+
+# Obrigatorio para "npx wrangler preview"; sem recursos de producao.
+[previews]
