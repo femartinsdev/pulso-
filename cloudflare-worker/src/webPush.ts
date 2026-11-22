@@ -148,144 +148,95 @@ function formatCentsBRLSimple(cents: number): string {
   return `R$ ${reaisStr},${centavos}`;
 }
 
-interface CopyTemplate {
-  title: string;
-  body: (amount: string, place: string) => string;
-}
+type ValueTier = 'small' | 'medium' | 'large';
 
-const EXPENSE_TEMPLATES: Record<PushTone, CopyTemplate[]> = {
-  sarcastic: [
-    {
-      title: 'PULSO · Mais uma saída detectada',
-      body: (v, m) => `${v} em ${m} no C6 Bank. O saldo pediu um minuto de silêncio — abra para categorizar.`,
-    },
-    {
-      title: 'PULSO · Cartão trabalhando pesado',
-      body: (v, m) => `Detectei ${v} em ${m}. Foi necessidade ou "bobeira"? Abra o PULSO e confesse na categoria.`,
-    },
-    {
-      title: 'PULSO · Alerta de carteira leve',
-      body: (v, m) => `Saída detectada: ${v} em ${m} (C6 Bank). Toque para sincronizar e categorizar.`,
-    },
-    {
-      title: 'PULSO · O Pix não dorme',
-      body: (v, m) => `${v} saindo em ${m}. Já deixei na fila — abra para colocar a etiqueta certa.`,
-    },
-  ],
-  funny: [
-    {
-      title: 'PULSO · Opa, gasto detectado!',
-      body: (v, m) => `Piscou e lá se foram ${v} em ${m} no C6 Bank. Toque para sincronizar e categorizar.`,
-    },
-    {
-      title: 'PULSO · Registro quentinho do C6',
-      body: (v, m) => `Detectei uma saída de ${v} em ${m}. Bora escolher a categoria antes que você esqueça?`,
-    },
-    {
-      title: 'PULSO · Dinheiro em movimento',
-      body: (v, m) => `${v} em ${m} capturado pelo receptor. Abra o PULSO para classificar rapidinho.`,
-    },
-    {
-      title: 'PULSO · Missão categoria',
-      body: (v, m) => `Nova saída de ${v} em ${m} detectada. Um toque e ela já entra certinha no seu extrato.`,
-    },
-  ],
-  discreet: [
-    {
-      title: 'PULSO · Nova saída detectada',
-      body: (v, m) => `Saída de ${v} em ${m} (C6 Bank). Abra para sincronizar e categorizar.`,
-    },
-    {
-      title: 'PULSO · Movimentação no C6 Bank',
-      body: (v, m) => `${v} em ${m} detectado. Toque para sincronizar com seu extrato.`,
-    },
-    {
-      title: 'PULSO · Lançamento aguardando categoria',
-      body: (v, m) => `Saída de ${v} em ${m}. Abra o PULSO para revisar e classificar.`,
-    },
-  ],
+/**
+ * Copys curtinhas na tela bloqueada: uma frase e, em linha separada,
+ * somente o valor. O sistema operacional exibe a identidade do PWA.
+ * Nenhum dado de estabelecimento, CPF/CNPJ ou descrição bancária é exposto.
+ */
+const INCOME_PHRASES: Record<PushTone, Record<ValueTier, string[]>> = {
+  sarcastic: {
+    small: [
+      'Olha quem resolveu aparecer... O DINHEIRO! 💸',
+      'Caiu um troquinho. Já dá pra respirar, né?',
+      'Opa! A pobreza deu um passinho pra trás.',
+      'Milagre! O saldo resolveu crescer.',
+      'É pouco, mas já dá pra se achar rico por 5 minutos.',
+    ],
+    medium: [
+      'AÍ SIM, PORRA! Agora começou a melhorar!',
+      'Ó o dinheiro chegando, meu patrão!',
+      'Recebeu Pix? Hoje o universo foi generoso.',
+      'O saldo tava triste. Agora tá até sorrindo.',
+      'Tá entrando grana, hein? Continua assim, filho!',
+    ],
+    large: [
+      'CARALHO, TÁ RICO, HEIN?! 💸',
+      'Calma, milionário! Lembra que os boletos existem.',
+      'QUE DINHEIRO GOSTOSO, MEU AMIGO!',
+      'Opa, magnata! O saldo até levantou pra aplaudir.',
+      'RESPEITA O HOMEM! Hoje a grana veio de terno!',
+    ],
+  },
+  funny: {
+    small: ['Olha o troquinho chegando! 🪙', 'Tem visita nova na carteira!', 'O saldo ganhou um cafezinho!'],
+    medium: ['Dinheiro na conta! Aí sim! 💸', 'Boa! O saldo tá sorrindo.', 'Hoje teve vitória financeira!'],
+    large: ['Olha o magnata passando! 💰', 'Hoje o saldo tá fazendo festa!', 'Agora sim, patrão!'],
+  },
+  discreet: {
+    small: ['Nova entrada recebida'],
+    medium: ['Entrada registrada'],
+    large: ['Nova entrada recebida'],
+  },
 };
 
-const INCOME_TEMPLATES: Record<PushTone, CopyTemplate[]> = {
-  sarcastic: [
-    {
-      title: 'PULSO · Olha só, entrou dinheiro!',
-      body: (v, m) => `Entrada de ${v} (${m}) detectada no C6 Bank. Aproveite antes do próximo Pix — toque para categorizar.`,
-    },
-    {
-      title: 'PULSO · Raro momento de paz no saldo',
-      body: (v, m) => `Detectei +${v} (${m}). Abra o PULSO para sincronizar e registrar essa vitória.`,
-    },
-    {
-      title: 'PULSO · Saldo respirando aliviado',
-      body: (v, m) => `Entrada detectada: ${v} (${m}) no C6 Bank. Toque para classificar no extrato.`,
-    },
-  ],
-  funny: [
-    {
-      title: 'PULSO · Opa, caiu na conta!',
-      body: (v, m) => `Entrada de ${v} (${m}) detectada no C6 Bank. Abra o PULSO para sincronizar e celebrar.`,
-    },
-    {
-      title: 'PULSO · Dinheiro entrando!',
-      body: (v, m) => `Detectei +${v} (${m}). Toque para puxar pro extrato e escolher a categoria.`,
-    },
-    {
-      title: 'PULSO · Boa notícia no C6 Bank',
-      body: (v, m) => `Entrada de ${v} (${m}) na fila de sincronização. Abra para confirmar.`,
-    },
-  ],
-  discreet: [
-    {
-      title: 'PULSO · Nova entrada detectada',
-      body: (v, m) => `Entrada de ${v} (${m}) no C6 Bank. Abra para sincronizar e categorizar.`,
-    },
-    {
-      title: 'PULSO · Crédito detectado no C6 Bank',
-      body: (v, m) => `${v} (${m}) aguardando sincronização. Toque para abrir o PULSO.`,
-    },
-  ],
+const EXPENSE_PHRASES: Record<PushTone, Record<ValueTier, string[]>> = {
+  sarcastic: {
+    small: [
+      'Lá se foi um troquinho. Pequeno, mas foi.',
+      'Mais uma mordidinha no saldo, hein, filho?',
+      'O dinheiro mal chegou e você já mandou embora?',
+      'Olha a carteira emagrecendo sem academia.',
+      'Gastou de novo? Você não sossega, né?',
+    ],
+    medium: [
+      'Tá ficando mais pobre, hein, filho? 👀',
+      'EITA, MÃO FURADA! Segura esse Pix!',
+      'Você trabalha e o dinheiro faz turismo.',
+      'O saldo pediu um minuto de silêncio.',
+      'Puta que pariu, esse dinheiro não para na conta!',
+    ],
+    large: [
+      'CARALHO! ESSA DOEU ATÉ EM MIM!',
+      'Calma, herdeiro! Você não é o Banco Central!',
+      'Rapaz... essa foi uma facada no saldo.',
+      'Tá gastando ou financiando a economia brasileira?',
+      'Esse gasto fez o saldo pedir socorro!',
+    ],
+  },
+  funny: {
+    small: ['Ih, lá foi um troquinho!', 'A carteira deu uma emagrecida.', 'E o dinheiro foi passear...'],
+    medium: ['Opa, freia essa carteira! 😅', 'Esse Pix saiu correndo!', 'O saldo sentiu essa.'],
+    large: ['EITA! Essa pesou na carteira!', 'O saldo tá precisando de férias.', 'A conta até ficou tonta!'],
+  },
+  discreet: {
+    small: ['Nova saída detectada'],
+    medium: ['Saída registrada'],
+    large: ['Nova saída detectada'],
+  },
 };
 
-const PRIVACY_TEMPLATES: Record<PushTone, Array<{ title: string; body: string }>> = {
-  sarcastic: [
-    {
-      title: 'PULSO · Movimentação detectada',
-      body: 'Seu C6 Bank se mexeu. Valores ocultos por privacidade — abra para ver o estrago e categorizar.',
-    },
-    {
-      title: 'PULSO · Novidade no C6 Bank',
-      body: 'Nova movimentação detectada na fila. Toque para sincronizar e dar um nome a isso.',
-    },
-    {
-      title: 'PULSO · Fila esperando você',
-      body: 'Detectei atividade no C6 Bank (modo discreto ativo). Abra o PULSO para classificar.',
-    },
-  ],
-  funny: [
-    {
-      title: 'PULSO · Opa, movimentação nova!',
-      body: 'O C6 Bank mandou sinal. Detalhes ocultos no modo privacidade — abra para sincronizar.',
-    },
-    {
-      title: 'PULSO · Tem novidade na fila',
-      body: 'Movimentação detectada no C6 Bank. Toque para abrir o PULSO e categorizar.',
-    },
-    {
-      title: 'PULSO · Extrato te chamando',
-      body: 'Detectei uma nova movimentação. Abra o PULSO para puxar e classificar.',
-    },
-  ],
-  discreet: [
-    {
-      title: 'PULSO · Nova movimentação detectada',
-      body: 'Há uma movimentação do C6 Bank aguardando sincronização e categorização.',
-    },
-    {
-      title: 'PULSO · Atualização disponível',
-      body: 'Nova movimentação detectada. Abra o aplicativo para sincronizar seu extrato.',
-    },
-  ],
+const TRANSFER_PHRASES: Record<PushTone, string[]> = {
+  sarcastic: ['Dinheiro mudou de endereço! 🔄', 'Transferiu? A grana só trocou de bolso.', 'O dinheiro passeou entre suas contas.'],
+  funny: ['Dinheiro de mudança! 🔄', 'A grana só trocou de lugar.'],
+  discreet: ['Transferência detectada'],
+};
+
+const PRIVATE_PHRASES: Record<PushTone, string[]> = {
+  sarcastic: ['Ih, sua carteira se mexeu! 👀', 'O saldo tem novidades...', 'Tem movimentação nova na área!'],
+  funny: ['Opa, tem novidade por aqui!', 'Sua carteira deu sinal de vida!'],
+  discreet: ['Nova movimentação detectada'],
 };
 
 export function pickNextPhraseIndex(poolLength: number, lastIndex: number): number {
@@ -306,17 +257,17 @@ export function buildPushCopyForEvent(input: {
 }): { payload: PushMessagePayload; nextPhraseIndex: number } {
   const tone: PushTone = isValidPushTone(input.tone) ? input.tone : 'sarcastic';
   const targetUrl = '/?from=push&sync=1';
+  const tag = 'pulso-evt-' + input.eventId;
 
   if (input.privacyMode) {
-    const pool = PRIVACY_TEMPLATES[tone];
+    const pool = PRIVATE_PHRASES[tone];
     const nextIdx = pickNextPhraseIndex(pool.length, input.lastPhraseIndex);
-    const tpl = pool[nextIdx];
     return {
       nextPhraseIndex: nextIdx,
       payload: {
-        title: tpl.title,
-        body: tpl.body,
-        tag: `pulso-evt-${input.eventId}`,
+        title: pool[nextIdx],
+        body: '',
+        tag,
         url: targetUrl,
         eventId: input.eventId,
         tone,
@@ -325,18 +276,25 @@ export function buildPushCopyForEvent(input: {
     };
   }
 
-  const amount = formatCentsBRLSimple(input.proposedAmountCents);
-  const place = (input.merchantName || input.proposedDescription || 'C6 Bank').trim().slice(0, 60);
-  const pool = input.proposedType === 'income' ? INCOME_TEMPLATES[tone] : EXPENSE_TEMPLATES[tone];
+  const cents = Math.abs(Math.round(input.proposedAmountCents));
+  const tier: ValueTier = input.proposedType === 'income'
+    ? (cents < 5000 ? 'small' : cents < 15000 ? 'medium' : 'large')
+    : (cents < 3000 ? 'small' : cents < 15000 ? 'medium' : 'large');
+  const pool = input.proposedType === 'transfer'
+    ? TRANSFER_PHRASES[tone]
+    : input.proposedType === 'income'
+      ? INCOME_PHRASES[tone][tier]
+      : EXPENSE_PHRASES[tone][tier];
   const nextIdx = pickNextPhraseIndex(pool.length, input.lastPhraseIndex);
-  const tpl = pool[nextIdx];
+  const signedAmount = (input.proposedType === 'income' ? '+ ' : input.proposedType === 'expense' ? '− ' : '') +
+    formatCentsBRLSimple(cents);
 
   return {
     nextPhraseIndex: nextIdx,
     payload: {
-      title: tpl.title,
-      body: tpl.body(amount, place),
-      tag: `pulso-evt-${input.eventId}`,
+      title: pool[nextIdx],
+      body: signedAmount,
+      tag,
       url: targetUrl,
       eventId: input.eventId,
       tone,
@@ -346,34 +304,19 @@ export function buildPushCopyForEvent(input: {
 }
 
 export function buildTestPushPayload(tone: PushTone, privacyMode: boolean): PushMessagePayload {
-  const safeTone = isValidPushTone(tone) ? tone : 'sarcastic';
-  if (privacyMode) {
-    return {
-      title: 'PULSO · Teste de notificação (privado)',
-      body: 'Notificação real recebida no iPhone com modo privacidade ativo. Nenhum valor é exibido.',
-      tag: 'pulso-test-push',
-      url: '/?from=push&sync=1',
-      tone: safeTone,
-      privacyMode: true,
-    };
-  }
-
-  const bodyByTone: Record<PushTone, string> = {
-    sarcastic:
-      'Teste concluído. Agora o PULSO já pode julgar seus gastos do C6 Bank direto na tela bloqueada.',
-    funny:
-      'Teste recebido com sucesso! Quando o C6 Bank apitar, o PULSO já te avisa por aqui.',
-    discreet:
-      'Teste de notificação confirmado. Novas movimentações detectadas do C6 Bank serão exibidas aqui.',
+  const safeTone: PushTone = isValidPushTone(tone) ? tone : 'sarcastic';
+  const titleByTone: Record<PushTone, string> = {
+    sarcastic: 'TÁ FUNCIONANDO, PORRA! 🔔',
+    funny: 'Olha eu aqui! 🔔',
+    discreet: 'Notificação de teste',
   };
-
   return {
-    title: 'PULSO · Notificação de teste ativa',
-    body: bodyByTone[safeTone],
+    title: titleByTone[safeTone],
+    body: '',
     tag: 'pulso-test-push',
     url: '/?from=push&sync=1',
     tone: safeTone,
-    privacyMode: false,
+    privacyMode,
   };
 }
 
