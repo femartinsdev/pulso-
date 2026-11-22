@@ -951,8 +951,11 @@ test('PULSO 2.0 Web Push: envia exatamente 1 push RFC 8291 por evento C6 aceito,
     privacyMode: false,
     lastPhraseIndex: firstCopy.nextPhraseIndex,
   });
-  assert.notEqual(firstCopy.payload.body, secondCopy.payload.body);
-  assert.ok(firstCopy.payload.body.includes('R$ 42,50'));
+  assert.notEqual(firstCopy.payload.title, secondCopy.payload.title);
+  assert.equal(firstCopy.payload.body, '− R$ 42,50');
+  assert.equal(firstCopy.payload.title.includes('PULSO ·'), false);
+  assert.equal(firstCopy.payload.body.includes('PIZZARIA'), false);
+  assert.equal(firstCopy.payload.body.includes('C6 Bank'), false);
 
   const privateCopy = buildPushCopyForEvent({
     eventId: 'evt_3',
